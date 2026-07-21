@@ -1,0 +1,26 @@
+# MediFlow Analytics — Non-secret configuration
+# Secrets (passwords, connection strings with credentials) belong in a
+# separate .env file, NEVER in this file, and NEVER committed to Git.
+
+database:
+  host: "localhost"
+  port: 5432
+  name: "mediflow_analytics"
+  # username and password are loaded from .env, not here
+
+paths:
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  logs_dir: "logs"
+
+etl:
+  chunk_size: 5000
+  fail_on_schema_mismatch: true
+  duplicate_check_columns:
+    patients: ["patient_id"]
+    doctors: ["doctor_id"]
+    appointments: ["appointment_id"]
+
+logging:
+  level: "INFO"
+  log_file: "logs/etl_pipeline.log"
