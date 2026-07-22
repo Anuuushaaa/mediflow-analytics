@@ -11,9 +11,13 @@ data quality issue seeded in Phase 2 gets addressed:
     isn't disqualifying, just incomplete)
   - Negative billing amounts / lab turnaround hours (quarantined)
   - Discharge date before admission date (quarantined)
-  - Orphan doctor_id in appointments (quarantined — required because
-    Phase 3's schema enforces STRICT foreign keys; these rows would
-    be rejected by PostgreSQL at Load time otherwise)
+  - Orphan patient_id / doctor_id / admission_id / bill_id in EVERY
+    child table (appointments, admissions, lab_results, pharmacy,
+    billing, insurance_claims) — quarantined because Phase 3's schema
+    enforces STRICT foreign keys; these rows would be rejected by
+    PostgreSQL at Load time otherwise. Deduplicating patients (or
+    quarantining bad billing rows) can orphan references in ANY
+    downstream table that points at that ID, not just appointments.
 
 Rejected rows are never silently dropped — they're written to
 data/processed/rejected/<dataset>_rejected.csv with a reason column,
@@ -53,6 +57,21 @@ def _quarantine(df: pd.DataFrame, reason: str, dataset_name: str) -> pd.DataFram
     return df
 
 
+def _filter_orphan_fk(df: pd.DataFrame, fk_column: str, valid_ids: set, dataset_name: str) -> pd.DataFrame:
+    """
+    Shared orphan-FK filter used by EVERY table that references patients,
+    doctors, or billing. This must run on every child table, not just
+    appointments — deduplicating patients (or quarantining bad billing
+    rows) can orphan references in ANY table that points at that ID,
+    which is exactly what surfaced as a ForeignKeyViolation at Load time
+    on 'admissions' during real-world testing of this pipeline.
+    """
+    orphan_mask = ~df[fk_column].isin(valid_ids)
+    if orphan_mask.any():
+        _quarantine(df[orphan_mask], f"{fk_column} does not exist in referenced table", dataset_name)
+    return df[~orphan_mask]
+
+
 # ---------------------------------------------------------------------------
 # PATIENTS
 # ---------------------------------------------------------------------------
@@ -78,8 +97,18 @@ def transform_patients(df: pd.DataFrame) -> pd.DataFrame:
     df = df[~dup_mask]
     logger.info(f"[patients] removed {before - len(df)} duplicate row(s)")
 
-    # 3. Missing email/phone — NOT disqualifying, just flagged for visibility
+    # 3. Fix phone_number dtype corruption: pandas upgrades this column to
+    #    float64 (e.g. 9362950628.0) whenever ANY row is missing, since
+    #    integer columns can't hold NaN. Must explicitly convert back to
+    #    clean string (or true null), or the ".0" gets written into
+    #    PostgreSQL as literal text.
+    df["phone_number"] = df["phone_number"].apply(
+        lambda x: str(int(x)) if pd.notna(x) else None
+    )
+
+    # 4. Missing email/phone — NOT disqualifying, just flagged for visibility
     missing_email = df["email"].isna().sum()
+
     missing_phone = df["phone_number"].isna().sum()
     logger.info(f"[patients] {missing_email} row(s) missing email, {missing_phone} missing phone (kept, flagged)")
 
@@ -111,16 +140,10 @@ def transform_appointments(df: pd.DataFrame, valid_doctor_ids: set, valid_patien
     df = df.copy()
     df["appointment_date"] = pd.to_datetime(df["appointment_date"])
 
-    # 1. Orphan doctor_id — required quarantine since Phase 3 schema has
-    #    strict FK constraints; these rows would be rejected at Load anyway
-    orphan_doctor_mask = ~df["doctor_id"].isin(valid_doctor_ids)
-    _quarantine(df[orphan_doctor_mask], "doctor_id does not exist in doctors table", "appointments")
-    df = df[~orphan_doctor_mask]
-
-    # 2. Orphan patient_id (defensive check, mirrors the doctor check)
-    orphan_patient_mask = ~df["patient_id"].isin(valid_patient_ids)
-    _quarantine(df[orphan_patient_mask], "patient_id does not exist in patients table", "appointments")
-    df = df[~orphan_patient_mask]
+    # 1. Orphan doctor_id / patient_id — required quarantine since Phase 3
+    #    schema has strict FK constraints; these rows would be rejected at Load
+    df = _filter_orphan_fk(df, "doctor_id", valid_doctor_ids, "appointments")
+    df = _filter_orphan_fk(df, "patient_id", valid_patient_ids, "appointments")
 
     # 3. Future-dated appointments beyond today — flag/quarantine as a
     #    scheduling-bug indicator
@@ -134,10 +157,16 @@ def transform_appointments(df: pd.DataFrame, valid_doctor_ids: set, valid_patien
 # ---------------------------------------------------------------------------
 # ADMISSIONS
 # ---------------------------------------------------------------------------
-def transform_admissions(df: pd.DataFrame) -> pd.DataFrame:
+def transform_admissions(df: pd.DataFrame, valid_patient_ids: set, valid_doctor_ids: set) -> pd.DataFrame:
     df = df.copy()
     df["admission_date"] = pd.to_datetime(df["admission_date"])
     df["discharge_date"] = pd.to_datetime(df["discharge_date"], errors="coerce")
+
+    # 0. Orphan patient_id / doctor_id (can arise after patient dedup in
+    #    transform_patients — must be checked in every child table, not
+    #    just appointments)
+    df = _filter_orphan_fk(df, "patient_id", valid_patient_ids, "admissions")
+    df = _filter_orphan_fk(df, "doctor_id", valid_doctor_ids, "admissions")
 
     # 1. Discharge before admission — quarantine (violates chk_admissions_
     #    discharge_after_admission in schema.sql; would fail at Load)
@@ -155,9 +184,12 @@ def transform_admissions(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # LAB RESULTS
 # ---------------------------------------------------------------------------
-def transform_lab_results(df: pd.DataFrame) -> pd.DataFrame:
+def transform_lab_results(df: pd.DataFrame, valid_patient_ids: set, valid_doctor_ids: set) -> pd.DataFrame:
     df = df.copy()
     df["test_date"] = pd.to_datetime(df["test_date"])
+
+    df = _filter_orphan_fk(df, "patient_id", valid_patient_ids, "lab_results")
+    df = _filter_orphan_fk(df, "doctor_id", valid_doctor_ids, "lab_results")
 
     # Negative turnaround hours — physically impossible, quarantine
     negative_mask = df["turnaround_hours"] < 0
@@ -170,18 +202,29 @@ def transform_lab_results(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # PHARMACY — clean pass-through
 # ---------------------------------------------------------------------------
-def transform_pharmacy(df: pd.DataFrame) -> pd.DataFrame:
+def transform_pharmacy(df: pd.DataFrame, valid_patient_ids: set, valid_doctor_ids: set) -> pd.DataFrame:
     df = df.copy()
     df["prescribed_date"] = pd.to_datetime(df["prescribed_date"])
+    df = _filter_orphan_fk(df, "patient_id", valid_patient_ids, "pharmacy")
+    df = _filter_orphan_fk(df, "doctor_id", valid_doctor_ids, "pharmacy")
     return df
 
 
 # ---------------------------------------------------------------------------
 # BILLING
 # ---------------------------------------------------------------------------
-def transform_billing(df: pd.DataFrame) -> pd.DataFrame:
+def transform_billing(df: pd.DataFrame, valid_patient_ids: set, valid_admission_ids: set) -> pd.DataFrame:
     df = df.copy()
     df["bill_date"] = pd.to_datetime(df["bill_date"])
+
+    df = _filter_orphan_fk(df, "patient_id", valid_patient_ids, "billing")
+
+    # admission_id is NULLABLE (a bill may not tie to an admission at all),
+    # so only quarantine rows where it's set AND doesn't match a real admission
+    orphan_admission_mask = df["admission_id"].notna() & ~df["admission_id"].isin(valid_admission_ids)
+    if orphan_admission_mask.any():
+        _quarantine(df[orphan_admission_mask], "admission_id does not exist in admissions table", "billing")
+    df = df[~orphan_admission_mask]
 
     # Negative billing amount — quarantine (violates chk_billing_amount_nonneg)
     negative_mask = df["amount"] < 0
@@ -199,9 +242,11 @@ def transform_billing(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # INSURANCE CLAIMS — clean pass-through
 # ---------------------------------------------------------------------------
-def transform_insurance_claims(df: pd.DataFrame) -> pd.DataFrame:
+def transform_insurance_claims(df: pd.DataFrame, valid_bill_ids: set, valid_patient_ids: set) -> pd.DataFrame:
     df = df.copy()
     df["claim_date"] = pd.to_datetime(df["claim_date"])
+    df = _filter_orphan_fk(df, "bill_id", valid_bill_ids, "insurance_claims")
+    df = _filter_orphan_fk(df, "patient_id", valid_patient_ids, "insurance_claims")
     return df
 
 
@@ -230,11 +275,15 @@ def transform_all(raw: dict) -> dict:
     valid_doctor_ids = set(clean["doctors"]["doctor_id"])
 
     clean["appointments"] = transform_appointments(raw["appointments"], valid_doctor_ids, valid_patient_ids)
-    clean["admissions"] = transform_admissions(raw["admissions"])
-    clean["lab_results"] = transform_lab_results(raw["lab_results"])
-    clean["pharmacy"] = transform_pharmacy(raw["pharmacy"])
-    clean["billing"] = transform_billing(raw["billing"])
-    clean["insurance_claims"] = transform_insurance_claims(raw["insurance_claims"])
+    clean["admissions"] = transform_admissions(raw["admissions"], valid_patient_ids, valid_doctor_ids)
+    clean["lab_results"] = transform_lab_results(raw["lab_results"], valid_patient_ids, valid_doctor_ids)
+    clean["pharmacy"] = transform_pharmacy(raw["pharmacy"], valid_patient_ids, valid_doctor_ids)
+
+    valid_admission_ids = set(clean["admissions"]["admission_id"])
+    clean["billing"] = transform_billing(raw["billing"], valid_patient_ids, valid_admission_ids)
+
+    valid_bill_ids = set(clean["billing"]["bill_id"])
+    clean["insurance_claims"] = transform_insurance_claims(raw["insurance_claims"], valid_bill_ids, valid_patient_ids)
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     for name, df in clean.items():
