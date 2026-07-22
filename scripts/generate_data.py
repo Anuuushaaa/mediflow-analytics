@@ -83,6 +83,15 @@ def generate_patients():
         fn, ln = make_name()
         dob = random_date(date(1935, 1, 1), date(2023, 12, 31))
         gender = random.choice(["M", "F", "Other"])
+        # registration_date must be on/after date_of_birth (a patient cannot
+        # register before they were born) AND within the valid system window.
+        # This directly satisfies chk_patients_registration_after_dob from
+        # Phase 3's schema.sql.
+        reg_window_start = max(dob, date(2018, 1, 1))
+        reg_window_end = date(2026, 7, 1)
+        if reg_window_start > reg_window_end:
+            reg_window_start = reg_window_end
+        registration_date = random_date(reg_window_start, reg_window_end)
         rows.append({
             "patient_id": i,
             "first_name": fn,
@@ -91,7 +100,7 @@ def generate_patients():
             "gender": gender,
             "phone_number": f"9{random.randint(100000000, 999999999)}",
             "email": f"{fn.lower()}.{ln.lower()}{i}@example.com",
-            "registration_date": random_date(date(2018, 1, 1), date(2026, 7, 1)),
+            "registration_date": registration_date,
             "blood_group": random.choice(["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"]),
             "city": random.choice(CITIES),
         })

@@ -35,3 +35,7 @@ Thumbs.db
 # --- IDE ---
 .vscode/
 .idea/
+# Ad-hoc logs and query output dumps
+load_error.log
+load_output.log
+sql/outputs/
