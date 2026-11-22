@@ -66,32 +66,88 @@ ORDER BY avg_length_of_stay_days DESC;
 -- A4. Insurance claim approval rate by provider
 -- Business question: "Which insurance payers reimburse slowest / least reliably?"
 -- -----------------------------------------------------------------------------
+
+-- A4. Insurance Claim Approval Rate by Provider
+-- Approval rate calculated using decided claims only.
+
 SELECT
     insurance_provider,
-    COUNT(*)                                                          AS total_claims,
-    SUM(CASE WHEN claim_status = 'Approved' THEN 1 ELSE 0 END)        AS approved,
-    SUM(CASE WHEN claim_status = 'Rejected' THEN 1 ELSE 0 END)        AS rejected,
+
+    COUNT(*) AS total_claims,
+
+    COUNT(*) FILTER (
+        WHERE claim_status = 'Approved'
+    ) AS approved_claims,
+
+    COUNT(*) FILTER (
+        WHERE claim_status = 'Rejected'
+    ) AS rejected_claims,
+
+    COUNT(*) FILTER (
+        WHERE claim_status = 'Pending'
+    ) AS pending_claims,
+
     ROUND(
-        100.0 * SUM(CASE WHEN claim_status = 'Approved' THEN 1 ELSE 0 END) / COUNT(*), 1
-    )                                                                  AS approval_rate_pct
+        100.0 * COUNT(*) FILTER (
+            WHERE claim_status = 'Approved'
+        )
+        / NULLIF(
+            COUNT(*) FILTER (
+                WHERE claim_status IN ('Approved', 'Rejected')
+            ), 0
+        ),
+        1
+    ) AS approval_rate_pct
+
 FROM insurance_claims
 GROUP BY insurance_provider
-ORDER BY approval_rate_pct ASC;
+ORDER BY approval_rate_pct ASC NULLS LAST;
+
 
 
 -- -----------------------------------------------------------------------------
 -- A5. Lab turnaround time by test type
 -- Business question: "Which tests are backlogged?" (Lab Management stakeholder)
 -- -----------------------------------------------------------------------------
+
+-- A5. Lab turnaround time by test type
+-- Separates completed tests from pending tests.
+
+
+-- A5. Lab Turnaround Time by Test Type
+-- Completed results: Normal or Abnormal
+-- Pending results are excluded from turnaround averages.
+
 SELECT
     test_name,
-    COUNT(*)                            AS total_tests,
-    ROUND(AVG(turnaround_hours), 1)     AS avg_turnaround_hours,
-    ROUND(MAX(turnaround_hours), 1)     AS worst_turnaround_hours,
-    SUM(CASE WHEN result_status = 'Pending' THEN 1 ELSE 0 END) AS still_pending
+
+    COUNT(*) AS total_tests,
+
+    COUNT(*) FILTER (
+        WHERE result_status IN ('Normal', 'Abnormal')
+    ) AS completed_tests,
+
+    COUNT(*) FILTER (
+        WHERE result_status = 'Pending'
+    ) AS pending_tests,
+
+    ROUND(
+        AVG(turnaround_hours) FILTER (
+            WHERE result_status IN ('Normal', 'Abnormal')
+        ), 1
+    ) AS avg_turnaround_hours,
+
+    ROUND(
+        MAX(turnaround_hours) FILTER (
+            WHERE result_status IN ('Normal', 'Abnormal')
+        ), 1
+    ) AS max_turnaround_hours
+
 FROM lab_results
 GROUP BY test_name
-ORDER BY avg_turnaround_hours DESC;
+ORDER BY avg_turnaround_hours DESC NULLS LAST;
+
+
 
 
 -- -----------------------------------------------------------------------------
@@ -132,36 +188,78 @@ ORDER BY patient_count DESC;
 -- cancellation rate, and length of stay into ONE ranked view using a CTE
 -- for each metric, then joins them together.
 -- -----------------------------------------------------------------------------
+
+-- B1. Department Resource Analysis
+-- Combines admission volume, doctor workload,
+-- cancellation rates, and average length of stay.
+
 WITH dept_volume AS (
-    SELECT a.department, COUNT(*) AS admission_count
-    FROM admissions a
-    GROUP BY a.department
+    SELECT
+        department,
+        COUNT(*) AS admission_count
+    FROM admissions
+    GROUP BY department
 ),
+
 dept_workload AS (
-    SELECT d.department, COUNT(ap.appointment_id) AS appointment_count,
-           COUNT(DISTINCT d.doctor_id) AS doctor_count
+    SELECT
+        d.department,
+        COUNT(ap.appointment_id) AS appointment_count,
+        COUNT(DISTINCT d.doctor_id) AS doctor_count
     FROM doctors d
-    LEFT JOIN appointments ap ON d.doctor_id = ap.doctor_id
+    LEFT JOIN appointments ap
+        ON d.doctor_id = ap.doctor_id
     GROUP BY d.department
 ),
+
 dept_efficiency AS (
-    SELECT department,
-           ROUND(AVG(discharge_date - admission_date), 1) AS avg_los
+    SELECT
+        department,
+        ROUND(
+            AVG(discharge_date - admission_date), 1
+        ) AS avg_los
     FROM admissions
     WHERE discharge_date IS NOT NULL
     GROUP BY department
+),
+
+dept_cancellations AS (
+    SELECT
+        d.department,
+        ROUND(
+            100.0 * COUNT(*) FILTER (
+                WHERE ap.status = 'Cancelled'
+            ) / NULLIF(COUNT(*), 0),
+            1
+        ) AS cancellation_rate_pct
+    FROM appointments ap
+    JOIN doctors d
+        ON ap.doctor_id = d.doctor_id
+    GROUP BY d.department
 )
+
 SELECT
-    v.department,
-    v.admission_count,
+    w.department,
+    COALESCE(v.admission_count, 0) AS admission_count,
     w.appointment_count,
     w.doctor_count,
-    ROUND(w.appointment_count::numeric / NULLIF(w.doctor_count, 0), 1) AS appointments_per_doctor,
+    ROUND(
+        w.appointment_count::numeric
+        / NULLIF(w.doctor_count, 0),
+        1
+    ) AS appointments_per_doctor,
+    COALESCE(c.cancellation_rate_pct, 0)
+        AS cancellation_rate_pct,
     e.avg_los
-FROM dept_volume v
-JOIN dept_workload w ON v.department = w.department
-JOIN dept_efficiency e ON v.department = e.department
+FROM dept_workload w
+LEFT JOIN dept_volume v
+    ON w.department = v.department
+LEFT JOIN dept_efficiency e
+    ON w.department = e.department
+LEFT JOIN dept_cancellations c
+    ON w.department = c.department
 ORDER BY appointments_per_doctor DESC;
+
 
 
 -- -----------------------------------------------------------------------------
@@ -216,15 +314,33 @@ ORDER BY month;
 -- HOSPITAL'S total revenue that represents (window function without GROUP BY
 -- collapsing patient-level detail)
 -- -----------------------------------------------------------------------------
+
+-- B4. Top 20 patients by total lifetime billing
+-- and percentage contribution to hospital revenue
+
+WITH patient_revenue AS (
+    SELECT
+        p.patient_id,
+        p.first_name || ' ' || p.last_name AS patient_name,
+        SUM(b.amount) AS patient_total_billing
+    FROM patients p
+    JOIN billing b
+        ON p.patient_id = b.patient_id
+    GROUP BY
+        p.patient_id,
+        p.first_name,
+        p.last_name
+)
+
 SELECT
-    p.patient_id,
-    p.first_name || ' ' || p.last_name AS patient_name,
-    SUM(b.amount) OVER (PARTITION BY p.patient_id) AS patient_total_billing,
+    patient_id,
+    patient_name,
+    patient_total_billing,
     ROUND(
-        100.0 * SUM(b.amount) OVER (PARTITION BY p.patient_id)
-        / SUM(b.amount) OVER (), 3
+        100.0 * patient_total_billing
+        / NULLIF(SUM(patient_total_billing) OVER (), 0),
+        3
     ) AS pct_of_total_hospital_revenue
-FROM patients p
-JOIN billing b ON p.patient_id = b.patient_id
+FROM patient_revenue
 ORDER BY patient_total_billing DESC
 LIMIT 20;

@@ -213,7 +213,11 @@ def transform_pharmacy(df: pd.DataFrame, valid_patient_ids: set, valid_doctor_id
 # ---------------------------------------------------------------------------
 # BILLING
 # ---------------------------------------------------------------------------
-def transform_billing(df: pd.DataFrame, valid_patient_ids: set, valid_admission_ids: set) -> pd.DataFrame:
+def transform_billing(
+    df: pd.DataFrame,
+    valid_patient_ids: set,
+    admissions: pd.DataFrame
+) -> pd.DataFrame:
     df = df.copy()
     df["bill_date"] = pd.to_datetime(df["bill_date"])
 
@@ -221,10 +225,51 @@ def transform_billing(df: pd.DataFrame, valid_patient_ids: set, valid_admission_
 
     # admission_id is NULLABLE (a bill may not tie to an admission at all),
     # so only quarantine rows where it's set AND doesn't match a real admission
-    orphan_admission_mask = df["admission_id"].notna() & ~df["admission_id"].isin(valid_admission_ids)
+   
+    # Reject bills referencing nonexistent admissions.
+    # Bills without an admission are allowed.
+    valid_admission_ids = set(admissions["admission_id"])
+
+    orphan_admission_mask = (
+        df["admission_id"].notna()
+        & ~df["admission_id"].isin(valid_admission_ids)
+    )
+
     if orphan_admission_mask.any():
-        _quarantine(df[orphan_admission_mask], "admission_id does not exist in admissions table", "billing")
-    df = df[~orphan_admission_mask]
+        _quarantine(
+            df[orphan_admission_mask],
+            "admission_id does not exist in admissions table",
+            "billing"
+        )
+
+    df = df[~orphan_admission_mask].copy()
+
+    # Check that admission-linked bills belong to the correct patient.
+    admission_to_patient = admissions.set_index(
+        "admission_id"
+    )["patient_id"]
+
+    linked_mask = df["admission_id"].notna()
+
+    expected_patient_ids = df.loc[
+        linked_mask, "admission_id"
+    ].map(admission_to_patient)
+
+    mismatch_mask = pd.Series(False, index=df.index)
+
+    mismatch_mask.loc[linked_mask] = (
+        df.loc[linked_mask, "patient_id"]
+        != expected_patient_ids
+    )
+
+    if mismatch_mask.any():
+        _quarantine(
+            df[mismatch_mask],
+            "billing patient_id does not match admission patient_id",
+            "billing"
+        )
+
+    df = df[~mismatch_mask].copy()
 
     # Negative billing amount — quarantine (violates chk_billing_amount_nonneg)
     negative_mask = df["amount"] < 0
@@ -242,12 +287,51 @@ def transform_billing(df: pd.DataFrame, valid_patient_ids: set, valid_admission_
 # ---------------------------------------------------------------------------
 # INSURANCE CLAIMS — clean pass-through
 # ---------------------------------------------------------------------------
-def transform_insurance_claims(df: pd.DataFrame, valid_bill_ids: set, valid_patient_ids: set) -> pd.DataFrame:
+
+def transform_insurance_claims(
+    df: pd.DataFrame,
+    billing: pd.DataFrame,
+    valid_patient_ids: set
+) -> pd.DataFrame:
     df = df.copy()
     df["claim_date"] = pd.to_datetime(df["claim_date"])
-    df = _filter_orphan_fk(df, "bill_id", valid_bill_ids, "insurance_claims")
-    df = _filter_orphan_fk(df, "patient_id", valid_patient_ids, "insurance_claims")
+
+    # 1. Reject claims referencing nonexistent bills or patients
+    valid_bill_ids = set(billing["bill_id"])
+
+    df = _filter_orphan_fk(
+        df, "bill_id", valid_bill_ids, "insurance_claims"
+    )
+
+    df = _filter_orphan_fk(
+        df, "patient_id", valid_patient_ids, "insurance_claims"
+    )
+
+    # 2. Map each valid bill to its patient
+    bill_to_patient = billing.set_index(
+        "bill_id"
+    )["patient_id"]
+
+    # 3. Find the patient associated with each claim's bill
+    expected_patient_ids = df["bill_id"].map(bill_to_patient)
+
+    # 4. Detect claims belonging to the wrong patient
+    mismatch_mask = (
+        df["patient_id"] != expected_patient_ids
+    )
+
+    # 5. Quarantine mismatched claims
+    if mismatch_mask.any():
+        _quarantine(
+            df[mismatch_mask],
+            "insurance patient_id does not match billing patient_id",
+            "insurance_claims"
+        )
+
+    df = df[~mismatch_mask].copy()
+
     return df
+
 
 
 # ---------------------------------------------------------------------------
@@ -279,11 +363,18 @@ def transform_all(raw: dict) -> dict:
     clean["lab_results"] = transform_lab_results(raw["lab_results"], valid_patient_ids, valid_doctor_ids)
     clean["pharmacy"] = transform_pharmacy(raw["pharmacy"], valid_patient_ids, valid_doctor_ids)
 
-    valid_admission_ids = set(clean["admissions"]["admission_id"])
-    clean["billing"] = transform_billing(raw["billing"], valid_patient_ids, valid_admission_ids)
+    clean["billing"] = transform_billing(
+        raw["billing"],
+        valid_patient_ids,
+        clean["admissions"]
+)
+    
+    clean["insurance_claims"] = transform_insurance_claims(
+        raw["insurance_claims"],
+        clean["billing"],
+        valid_patient_ids
+    )
 
-    valid_bill_ids = set(clean["billing"]["bill_id"])
-    clean["insurance_claims"] = transform_insurance_claims(raw["insurance_claims"], valid_bill_ids, valid_patient_ids)
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     for name, df in clean.items():

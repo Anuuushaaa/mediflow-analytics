@@ -13,8 +13,6 @@ python-dotenv==1.0.1
 # --- Logging (structured logging beyond stdlib defaults) ---
 loguru==0.7.2
 
-# --- Data validation ---
-great-expectations==0.18.19
 
 # --- Testing ---
 pytest==8.2.0
