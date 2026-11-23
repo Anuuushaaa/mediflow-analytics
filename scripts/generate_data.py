@@ -263,21 +263,42 @@ def generate_pharmacy(patient_ids, doctor_ids):
 # ---------------------------------------------------------------------------
 # BILLING
 # ---------------------------------------------------------------------------
-def generate_billing(patient_ids, admission_ids):
+
+def generate_billing(patient_ids, admissions):
     rows = []
+
+    # Map each admission to its actual patient
+    admission_to_patient = dict(
+        zip(admissions["admission_id"], admissions["patient_id"])
+    )
+
+    admission_ids = admissions["admission_id"].tolist()
+
     for i in range(1, N_BILLING + 1):
+
+        # Preserve the original admission selection logic
+        admission_id = random.choice(admission_ids + [None] * 5)
+
+        if admission_id is not None:
+            # Patient must match the selected admission
+            patient_id = admission_to_patient[admission_id]
+        else:
+            # Bills without an admission can belong to any patient
+            patient_id = random.choice(patient_ids)
+
         rows.append({
             "bill_id": i,
-            "patient_id": random.choice(patient_ids),
-            "admission_id": random.choice(admission_ids + [None] * 5),  # some bills aren't tied to admission
+            "patient_id": patient_id,
+            "admission_id": admission_id,
             "bill_date": random_date(date(2023, 1, 1), date(2026, 7, 20)),
             "amount": round(random.uniform(500, 250000), 2),
             "payment_status": random.choice(["Paid", "Pending", "Overdue"]),
             "payment_method": random.choice(["Insurance", "Self-pay", "Cash"]),
         })
+
     df = pd.DataFrame(rows)
 
-    # Seed issue: negative billing amounts (data entry/refund logging error) — 1%
+    # Preserve the intentional 1% negative billing amounts
     mask = df.sample(frac=0.01, random_state=9).index
     df.loc[mask, "amount"] = -abs(df.loc[mask, "amount"])
 
@@ -287,19 +308,42 @@ def generate_billing(patient_ids, admission_ids):
 # ---------------------------------------------------------------------------
 # INSURANCE CLAIMS
 # ---------------------------------------------------------------------------
-def generate_insurance_claims(bill_ids, patient_ids):
+
+def generate_insurance_claims(billing):
     rows = []
+
+    # Map each bill to the patient who owns it
+    bill_to_patient = dict(
+        zip(billing["bill_id"], billing["patient_id"])
+    )
+
+    bill_ids = billing["bill_id"].tolist()
+
     for i in range(1, N_INSURANCE_CLAIMS + 1):
+
+        # Select an existing bill
+        bill_id = random.choice(bill_ids)
+
+        # Derive the patient from the selected bill
+        patient_id = bill_to_patient[bill_id]
+
         rows.append({
             "claim_id": i,
-            "bill_id": random.choice(bill_ids),
-            "patient_id": random.choice(patient_ids),
+            "bill_id": bill_id,
+            "patient_id": patient_id,
             "insurance_provider": random.choice(INSURANCE_PROVIDERS),
             "claim_amount": round(random.uniform(500, 200000), 2),
-            "claim_status": random.choice(["Approved", "Rejected", "Pending"]),
-            "claim_date": random_date(date(2023, 1, 1), date(2026, 7, 20)),
+            "claim_status": random.choice(
+                ["Approved", "Rejected", "Pending"]
+            ),
+            "claim_date": random_date(
+                date(2023, 1, 1),
+                date(2026, 7, 20)
+            ),
         })
+
     return pd.DataFrame(rows)
+
 
 
 def main():
@@ -326,11 +370,11 @@ def main():
     pharmacy = generate_pharmacy(patient_ids, doctor_ids)
 
     print("Generating billing...")
-    billing = generate_billing(patient_ids, admission_ids)
-    bill_ids = billing["bill_id"].tolist()
+    billing = generate_billing(patient_ids, admissions)
+    
 
     print("Generating insurance_claims...")
-    insurance_claims = generate_insurance_claims(bill_ids, patient_ids)
+    insurance_claims = generate_insurance_claims(billing)
 
     datasets = {
         "patients": patients,
