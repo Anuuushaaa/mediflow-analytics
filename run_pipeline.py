@@ -1,23 +1,21 @@
 
 """
-MediFlow Analytics - Pipeline Orchestrator (Phase 11)
+MediFlow Analytics - Main ETL Pipeline.
 
-Single entry point for the full ETL pipeline:
+Pipeline stages:
+1. Extract raw healthcare datasets.
+2. Clean and transform datasets.
+3. Load data into PostgreSQL.
+4. Log execution results.
 
-Extract -> Transform -> Load and Verify
+Supported load modes:
+- full (default): Truncate and reload all tables.
+- incremental: Insert new records, update changed records,
+  and preserve unchanged or missing source records.
 
-Designed for unattended execution using Windows Task
-Scheduler, Docker, cron, or another orchestration tool.
-
-Exit codes:
-    0 = Pipeline completed successfully
-    1 = Pipeline failed
-
-Usage:
-    python run_pipeline.py
-
-Docker:
-    Set MEDIFLOW_CONFIG=config/docker_config.yaml
+Environment variables:
+- MEDIFLOW_CONFIG: Path to YAML configuration file.
+- MEDIFLOW_LOAD_MODE: "full" or "incremental".
 """
 
 import logging
@@ -26,135 +24,171 @@ import sys
 import time
 from datetime import datetime
 
-from etl.extract import extract_all, ExtractionError
+from etl.extract import extract_all
 from etl.transform import transform_all
 from etl.load import load_all, LoadError
+from etl.incremental_load import (
+    incremental_load_all,
+    IncrementalLoadError,
+)
 
 
-logger = logging.getLogger("run_pipeline")
+# --------------------------------------------------
+# Logging configuration
+# --------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+logger = logging.getLogger("mediflow.pipeline")
 
 
-def run() -> int:
+# --------------------------------------------------
+# Main ETL pipeline
+# --------------------------------------------------
+
+def run():
     """
-    Execute the full ETL pipeline.
+    Execute the complete MediFlow ETL pipeline.
 
     Returns:
-        0 on success
-        1 on failure
+        0: Pipeline completed successfully.
+        1: Pipeline failed.
     """
-
-    # Select configuration based on the environment.
-    # Windows uses the existing configuration by default.
-    # Docker will explicitly set MEDIFLOW_CONFIG.
-    config_path = os.getenv(
-        "MEDIFLOW_CONFIG",
-        "config/config.yaml"
-    )
 
     start_time = time.time()
 
-    run_started_at = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
+    config_path = os.getenv(
+        "MEDIFLOW_CONFIG",
+        "config/config.yaml",
     )
 
-    logger.info("#" * 70)
-    logger.info(
-        "# MediFlow Analytics - Pipeline run started at %s",
-        run_started_at,
-    )
-    logger.info("# Configuration: %s", config_path)
-    logger.info("#" * 70)
+    load_mode = os.getenv(
+        "MEDIFLOW_LOAD_MODE",
+        "full",
+    ).strip().lower()
 
-    stage = "Extract"
+    logger.info("=" * 60)
+    logger.info("MediFlow Analytics ETL Pipeline")
+    logger.info("Started at: %s", datetime.now().isoformat())
+    logger.info("Configuration: %s", config_path)
+    logger.info("Load mode: %s", load_mode.upper())
+    logger.info("=" * 60)
 
     try:
-        # Stage 1: Extract raw datasets.
-        logger.info("Starting extraction")
+        # Validate mode before extracting any data.
+        if load_mode not in ("full", "incremental"):
+            raise ValueError(
+                f"Unsupported MEDIFLOW_LOAD_MODE: {load_mode}. "
+                "Expected 'full' or 'incremental'."
+            )
+
+        # ------------------------------------------
+        # Stage 1: Extract
+        # ------------------------------------------
+
+        logger.info("STAGE 1: Extracting raw datasets")
 
         raw = extract_all(
             config_path=config_path
         )
 
-        # Stage 2: Clean and transform datasets.
-        stage = "Transform"
+        logger.info(
+            "Extraction completed: %s datasets",
+            len(raw),
+        )
 
-        logger.info("Starting transformation")
+        # ------------------------------------------
+        # Stage 2: Transform
+        # ------------------------------------------
+
+        logger.info("STAGE 2: Transforming datasets")
 
         clean = transform_all(raw)
 
-        # Stage 3: Load and verify inside one transaction.
-        stage = "Load and Verify"
+        logger.info(
+            "Transformation completed: %s datasets",
+            len(clean),
+        )
+
+        # ------------------------------------------
+        # Stage 3: Load
+        # ------------------------------------------
+
+        logger.info("STAGE 3: Loading into PostgreSQL")
+
+        if load_mode == "full":
+
+            logger.info(
+                "Executing FULL REFRESH load"
+            )
+
+            load_all(
+                clean,
+                config_path=config_path,
+            )
+
+        elif load_mode == "incremental":
+
+            logger.info(
+                "Executing INCREMENTAL load"
+            )
+
+            incremental_load_all(
+                clean,
+                config_path=config_path,
+            )
 
         logger.info(
-            "Starting transactional load and verification"
+            "Database loading completed successfully"
         )
 
-        load_all(
-            clean,
-            config_path=config_path
-        )
+        # ------------------------------------------
+        # Stage 4: Execution summary
+        # ------------------------------------------
 
-    except (ExtractionError, LoadError) as e:
-        elapsed = round(time.time() - start_time, 1)
+        elapsed = time.time() - start_time
 
-        logger.error("#" * 70)
-        logger.error(
-            "# PIPELINE FAILED at stage: %s",
-            stage,
+        logger.info("=" * 60)
+        logger.info("ETL PIPELINE COMPLETED SUCCESSFULLY")
+        logger.info("Load mode: %s", load_mode.upper())
+        logger.info("Execution time: %.2f seconds", elapsed)
+
+        for table, df in clean.items():
+            logger.info(
+                "%s: %s cleaned source records",
+                table,
+                len(df),
+            )
+
+        logger.info("=" * 60)
+
+        return 0
+
+    except (LoadError, IncrementalLoadError) as exc:
+
+        logger.exception(
+            "Database loading failed: %s",
+            exc,
         )
-        logger.error("# Reason: %s", e)
-        logger.error(
-            "# Elapsed time before failure: %ss",
-            elapsed,
-        )
-        logger.error("#" * 70)
 
         return 1
 
-    except Exception as e:
-        elapsed = round(time.time() - start_time, 1)
+    except Exception as exc:
 
-        logger.error("#" * 70)
-        logger.error(
-            "# PIPELINE FAILED at stage: %s "
-            "(UNEXPECTED ERROR)",
-            stage,
+        logger.exception(
+            "ETL pipeline failed: %s",
+            exc,
         )
-        logger.error(
-            "# Reason: %s: %s",
-            type(e).__name__,
-            e,
-        )
-        logger.error(
-            "# Elapsed time before failure: %ss",
-            elapsed,
-        )
-        logger.exception("Full traceback:")
-        logger.error("#" * 70)
 
         return 1
 
-    elapsed = round(time.time() - start_time, 1)
 
-    logger.info("#" * 70)
-    logger.info(
-        "# PIPELINE SUCCEEDED - completed in %ss",
-        elapsed,
-    )
-
-    logger.info(
-        "# Rows loaded: %s",
-        ", ".join(
-            f"{table}={len(df):,}"
-            for table, df in clean.items()
-        ),
-    )
-
-    logger.info("#" * 70)
-
-    return 0
-
+# --------------------------------------------------
+# Entry point
+# --------------------------------------------------
 
 if __name__ == "__main__":
-    exit_code = run()
-    sys.exit(exit_code)
+    sys.exit(run())
