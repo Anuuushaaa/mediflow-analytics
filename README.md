@@ -1,231 +1,283 @@
 # MediFlow Analytics
 
-An end-to-end healthcare data engineering and business intelligence platform that ingests, validates, transforms, stores, and analyzes hospital operational data through a modular Python ETL pipeline, PostgreSQL, SQL analytics, and interactive Power BI dashboards — fully automated with scheduled unattended runs and a regression-tested pipeline.
+**Healthcare data engineering and business intelligence | Python · PostgreSQL · Docker · Apache Airflow · Power BI · GitHub Actions**
 
-## Problem Statement
+MediFlow Analytics is an end-to-end healthcare analytics project that generates synthetic hospital data, validates and transforms eight operational datasets, loads them into a relational PostgreSQL database, and makes them available for SQL analysis and interactive Power BI reporting.
 
-Hospital data is fragmented across independent operational systems — registration, scheduling, labs, pharmacy, billing, insurance — so hospital management cannot easily answer basic operational, financial, and clinical questions without manually cross-referencing multiple sources. MediFlow Analytics centralizes this data into a single analytics platform so management can identify inefficiencies and make faster, evidence-based decisions.
+The project goes beyond a one-off ETL script: it includes **full-refresh and incremental load modes**, data-quality quarantine, transactional database loading, regression tests, Docker-based execution, scheduled Apache Airflow orchestration, and GitHub Actions CI.
 
-## Status: Complete ✅
+> **Data disclaimer:** All hospital records are synthetically generated for this portfolio project. No real patient data is used.
 
-| Phase | Description | Status |
-|---|---|---|
-| 0 | Business Understanding | ✅ |
-| 1 | Project Setup | ✅ |
-| 2 | Dataset Collection & Generation | ✅ |
-| 3 | Database Design (PostgreSQL) | ✅ |
-| 4 | Extract Layer | ✅ |
-| 5 | Transform Layer | ✅ |
-| 6 | Load Layer | ✅ |
-| 7 | SQL Analytics | ✅ |
-| 8 | Power BI Data Modeling | ✅ |
-| 9 | Dashboard Development | ✅ |
-| 10 | Automated Testing (pytest) | ✅ |
-| 11 | Automation & Scheduling | ✅ |
-| 12 | Documentation | ✅ |
+## Why this project exists
 
----
+Hospital data is often split across patient registration, appointments, admissions, laboratories, pharmacy, billing, and insurance systems. Answering operational and financial questions across those systems requires consistent identifiers, reliable data quality, and a shared analytical database.
+
+MediFlow brings these datasets together so stakeholders can explore patient activity, departmental workloads, revenue trends, insurance claims, and service performance.
 
 ## Architecture
 
-```
-                     ┌─────────────────┐
-                     │  Synthetic Data  │
-                     │   Generator      │  (scripts/generate_data.py)
-                     └────────┬────────┘
-                              │  8 raw CSVs
-                              ▼
-                     ┌─────────────────┐
-                     │     EXTRACT      │  structural validation only
-                     │  etl/extract.py  │  (file exists, columns match)
-                     └────────┬────────┘
-                              ▼
-                     ┌─────────────────┐
-                     │    TRANSFORM     │  business-rule cleaning:
-                     │ etl/transform.py │  dedup, orphan-FK filtering,
-                     └────────┬────────┘  derived columns, quarantine
-                              │  clean DataFrames + rejected/*.csv
-                              ▼
-                     ┌─────────────────┐
-                     │      LOAD        │  transactional truncate +
-                     │   etl/load.py    │  reload, row-count verification
-                     └────────┬────────┘
-                              ▼
-                     ┌─────────────────┐
-                     │   PostgreSQL     │  8 normalized tables,
-                     │ mediflow_analytics│ 12 FK constraints, 15 CHECK
-                     └────────┬────────┘  constraints, 17 indexes
-                              │
-                ┌─────────────┴─────────────┐
-                ▼                             ▼
-     ┌─────────────────┐           ┌─────────────────┐
-     │   SQL Analytics  │           │    Power BI      │
-     │ 11 queries: core  │           │  3-page dashboard │
-     │ + CTEs + window   │           │  12 relationships, │
-     │ functions          │           │  9 DAX measures    │
-     └─────────────────┘           └─────────────────┘
-
-     run_pipeline.py orchestrates Extract → Transform → Load → Verify,
-     scheduled daily via Windows Task Scheduler, with exit codes for
-     automated failure detection. tests/ (pytest) covers Extract and
-     Transform logic, including regression tests for real bugs found
-     during development (below).
+```mermaid
+flowchart TD
+    A[Seeded synthetic data generator] --> B[Eight raw CSV datasets]
+    B --> C[Extract: file and schema validation]
+    C --> D[Transform: cleaning and business rules]
+    D --> E[Rejected records and quarantine]
+    D --> F{Load mode}
+    F -->|Full refresh| G[Transactional truncate and reload]
+    F -->|Incremental| H[PostgreSQL upserts]
+    G --> I[(PostgreSQL: eight related tables)]
+    H --> I
+    I --> J[SQL analytics: CTEs and window functions]
+    I --> K[Power BI: three report pages]
+    L[Apache Airflow: scheduled DAG] --> C
+    M[GitHub Actions: automated tests] -.-> C
 ```
 
-## Tech Stack
+`run_pipeline.py` coordinates extraction, transformation, and loading. The pipeline selects its configuration through `MEDIFLOW_CONFIG` and its load strategy through `MEDIFLOW_LOAD_MODE`.
 
-**Language & Libraries:** Python 3.13, Pandas, NumPy, SQLAlchemy, psycopg2, PyYAML, python-dotenv, pytest
-**Database:** PostgreSQL 18
-**BI/Visualization:** Power BI Desktop (DAX, CTEs, window functions)
-**Automation:** Windows Task Scheduler
-**Version Control:** Git
+### Database and analytics
 
----
+- **8 PostgreSQL tables:** `patients`, `doctors`, `appointments`, `admissions`, `lab_results`, `pharmacy`, `billing`, and `insurance_claims`.
+- **Relational integrity:** 12 foreign-key constraints, 15 CHECK constraints, and 17 indexes in the schema.
+- **SQL analysis:** 11 analytical queries, including common table expressions and window functions.
+- **Power BI:** 3 dashboard pages, with 12 model relationships and 9 DAX measures.
 
-## Business Questions Answered
+## Engineering features
 
-Mapped directly to hospital stakeholders (Executive Board, Department Heads, Doctors, Finance, Lab Management):
+### Extraction and data quality
 
-- Which departments generate the most revenue, and which need additional resources?
-- What is each doctor's appointment workload, cancellation, and no-show rate?
-- What is the average length of stay by department?
-- Which insurance providers have the lowest claim approval rates?
-- Which lab tests have the worst turnaround times / are backlogged?
-- What is the month-over-month revenue trend?
-- Who are the top-performing doctors within each department?
+The Extract layer checks source-file presence, expected columns, and nonempty datasets. The Transform layer standardizes values, removes duplicates, computes derived fields, validates relationships, and separates rejected rows for inspection rather than silently loading invalid records.
 
----
+The seeded data generator deliberately produces imperfect synthetic records, allowing the pipeline to exercise validation and quarantine behavior.
 
-## Bugs Found & Fixed During Development
+### Full-refresh and incremental loading
 
-This project surfaced three genuine data engineering bugs during development — not hypothetical edge cases, but real issues caught by the pipeline's own validation layers, schema constraints, and test suite. Each is documented here because *finding and fixing real bugs* is a stronger engineering signal than a pipeline that never encounters any.
+| Mode | Setting | Behavior |
+|---|---|---|
+| Full refresh | `MEDIFLOW_LOAD_MODE=full` | Transactional reload with post-load verification |
+| Incremental | `MEDIFLOW_LOAD_MODE=incremental` | PostgreSQL upserts insert new rows and update changed rows; unchanged rows are left untouched |
 
-### 1. Registration date generated before date of birth
+Incremental loading is designed to be **idempotent**: processing the same unchanged input again does not create duplicate records or unnecessary updates. Records missing from a later source batch are preserved rather than automatically deleted. Database errors trigger transaction rollback.
 
-**Found by:** PostgreSQL's `chk_patients_registration_after_dob` CHECK constraint, rejecting a load at the database layer.
+> **Important:** The incremental mode performs upserts against the provided source datasets; it is not a change-data-capture (CDC) streaming system.
 
-**Root cause:** `scripts/generate_data.py` originally generated `date_of_birth` and `registration_date` from two independent random ranges. Since `date_of_birth` could be as recent as late 2023 and `registration_date` could start as early as 2018, nothing prevented a patient from having a registration date *before* their own birth.
+### Docker and orchestration
 
-**Fix:** `registration_date` is now generated as a random date within `[max(date_of_birth, 2018-01-01), 2026-07-01]`, guaranteeing it can never precede the patient's birth.
+- **Docker Compose** provisions a PostgreSQL 18 service and a containerized Python ETL service.
+- **Apache Airflow 2.10.5** runs a three-task DAG: check database connectivity, execute the ETL pipeline, and verify loaded record counts.
+- The Airflow DAG is scheduled daily at **02:00 Asia/Kolkata**. Its default load mode is **full refresh**, unless the environment is configured otherwise.
+- A separate PostgreSQL 16 service stores Airflow metadata; hospital analytics data remains in the PostgreSQL 18 database.
+- Windows Task Scheduler was also used for local unattended runs during the original project development.
 
-**Why it matters:** proves the database schema's constraints are doing real work, not just decorative — they caught a genuine logic bug in upstream data generation before it reached the database.
+### Testing and CI
 
-### 2. Cascading orphan foreign keys across every child table
+Run the local test suite with:
 
-**Found by:** A `ForeignKeyViolation` at Load time on the `admissions` table, despite `appointments` loading successfully.
-
-**Root cause:** The Transform layer's orphan-foreign-key filtering was only implemented for the `appointments` table. When duplicate patient records were correctly removed during patient deduplication, every other table referencing those now-deleted patient IDs (`admissions`, `lab_results`, `pharmacy`, `billing`, `insurance_claims`) was left with dangling references — but only `appointments` was actually being checked for this.
-
-**Fix:** Built a shared `_filter_orphan_fk()` helper and applied it consistently across **every** child table, including the nullable `billing.admission_id` case (only quarantined when set AND invalid) and the two-level dependency in `insurance_claims` (validated against both `bill_id` and `patient_id`).
-
-**Why it matters:** a bug passing tests on one table doesn't guarantee the same guarantee holds on structurally similar tables sharing the same dependency — this is a genuinely common and underrated class of data pipeline bug.
-
-### 3. Phone number silently corrupted to "9876543210.0"
-
-**Found by:** Manual inspection in Power BI, then traced back through the pipeline to its root cause.
-
-**Root cause:** `pandas` silently upcasts an integer-like column to `float64` the moment **any** row in that column is missing (`NaN` cannot exist in an integer column). Since `patients.phone_number` has a deliberately-seeded 3% missing rate, the entire column silently became floats — e.g. `9876543210` became `9876543210.0` — and that float representation was written into PostgreSQL's `VARCHAR` column as literal text, `.0` and all. `doctors.phone_number` never showed the bug, since it has zero missing values.
-
-**Fix:** `transform_patients()` now explicitly casts `phone_number` to a clean string (or a true `None` for missing values) before it ever reaches the database.
-
-**Why it matters:** a great example of a bug that only manifests conditionally (present with missing data, absent without it) — exactly the kind of thing a fixed-data smoke test would never catch, and exactly why the pytest regression test below exists.
-
----
-
-## Testing
-
-```bash
+```powershell
 python -m pytest tests/ -v
 ```
 
-23 automated tests across Extract (structural validation) and Transform (business rules), including an explicit regression test for the phone_number bug above — verified during development by deliberately reintroducing the bug and confirming the test suite caught it before restoring the fix.
+**Latest local result:** 36 passed, 2 skipped (38 collected). The two skipped tests are database integration tests requiring explicit opt-in and a dedicated PostgreSQL test database; their skip status is not a test failure.
 
-## Automation
+Tests cover structural validation, transformation rules, referential integrity, quarantine handling, transaction rollback, and incremental upsert behavior. GitHub Actions runs automated tests against a disposable PostgreSQL test environment.
 
-The full pipeline runs unattended, daily at 2 AM, via Windows Task Scheduler, calling:
+See [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the CI configuration.
 
-```bash
-python run_pipeline.py
-```
+## Three real bugs found and fixed
 
-Returns exit code `0` on success, `1` on failure (with the specific failed stage logged), enabling automated failure detection.
+These were discovered during development through database constraints, load failures, and dashboard inspection—not invented examples.
 
----
+**1. Patient registration before birth.** The original generator sampled dates of birth and registration dates independently, occasionally producing impossible records. PostgreSQL's `chk_patients_registration_after_dob` constraint rejected the load. The generator now ensures registration cannot precede birth.
 
-## Project Structure
+**2. Orphan foreign keys across child tables.** Deduplicating patients could remove IDs still referenced by admissions, lab results, pharmacy, billing, and insurance claims. The fix introduced a reusable `_filter_orphan_fk()` helper applied across dependent datasets, including nullable admission references and insurance-claim dependencies.
 
-```
+**3. Phone numbers stored with a `.0` suffix.** Missing values caused pandas to promote an integer-like phone-number column to floating point, turning values such as `9876543210` into `9876543210.0`. The transformation now preserves phone numbers as clean text and retains genuinely missing values as nulls. A regression test protects against recurrence.
+
+## Technology stack
+
+| Area | Technologies |
+|---|---|
+| Programming and transformation | Python, pandas, NumPy |
+| Database and connectivity | PostgreSQL 18, SQLAlchemy, psycopg2 |
+| Configuration and logging | PyYAML, python-dotenv, Loguru / Python logging |
+| Containerization | Docker, Docker Compose |
+| Orchestration | Apache Airflow 2.10.5 |
+| Quality and CI | pytest, GitHub Actions |
+| Analytics and reporting | SQL, Power BI, DAX |
+| Version control | Git, GitHub |
+
+## Repository structure
+
+```text
 MediFlow-Analytics/
+├── .github/workflows/ci.yml      # Automated CI tests
+├── airflow/dags/mediflow_etl_dag.py
+├── config/
+│   ├── config.yaml               # Local configuration
+│   ├── docker_config.yaml        # Container configuration
+│   └── test_config.yaml          # Test configuration
 ├── data/
-│   ├── raw/                  # generated CSVs (gitignored, reproducible)
-│   └── processed/
-│       └── rejected/         # quarantined rows with rejection_reason
+│   ├── raw/                      # Generated source CSVs (not committed)
+│   └── processed/                # Transformed outputs and rejected records
 ├── database/
-│   └── schema.sql            # PostgreSQL DDL: 8 tables, FKs, CHECKs, indexes
+│   ├── schema.sql
+│   └── seed_data.sql
+├── docs/screenshots/             # Dashboard screenshots
 ├── etl/
 │   ├── extract.py
 │   ├── transform.py
-│   └── load.py
-├── scripts/
-│   └── generate_data.py      # synthetic data generator (seeded, reproducible)
-├── sql/
-│   └── analytics_queries.sql # 11 queries: 7 core + 4 advanced (CTEs/window fns)
-├── tests/
-│   ├── conftest.py
-│   ├── test_extract.py
-│   └── test_transform.py
-├── config/
-│   └── config.yaml           # non-secret configuration
-├── .env.example               # required environment variables (template)
-├── run_pipeline.py            # orchestrator: Extract → Transform → Load → Verify
+│   ├── load.py
+│   └── incremental_load.py
+├── powerbi/mediflow-analytics.pbix
+├── scripts/generate_data.py
+├── sql/                          # Analytical SQL queries
+├── tests/                        # Automated tests
+├── .env.example
+├── Dockerfile
+├── compose.yaml
+├── compose.airflow.yaml
 ├── requirements.txt
+├── run_pipeline.py
 └── README.md
 ```
 
-## Setup
+Generated CSVs, credentials, and runtime artifacts are not intended to be committed to version control.
 
-```bash
-git clone <repo-url>
-cd MediFlow-Analytics
+## Getting started
+
+### Prerequisites
+
+- Python 3.11+ and PostgreSQL 18 for local execution; **or** Docker with Docker Compose for containerized execution.
+- Power BI Desktop (Windows) to open the interactive report.
+
+### 1. Clone and configure
+
+The following commands are for **PowerShell on Windows**:
+
+```powershell
+git clone https://github.com/Anuuushaaa/mediflow-analytics.git
+cd mediflow-analytics
 python -m venv venv
-venv\Scripts\Activate.ps1        # Windows
-pip install -r requirements.txt
-cp .env.example .env             # fill in your PostgreSQL credentials
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+```
 
-# Create the database
+Edit `.env` to supply your own `DB_USER` and `DB_PASSWORD`. **Never commit `.env` or real credentials.**
+
+Generate the synthetic source files before running either deployment mode:
+
+```powershell
+python scripts/generate_data.py
+```
+
+### 2A. Run locally with PostgreSQL
+
+Create a local database named `mediflow_analytics` and apply the schema using an account with sufficient permissions:
+
+```powershell
 psql -U postgres -c "CREATE DATABASE mediflow_analytics;"
 psql -U postgres -d mediflow_analytics -f database/schema.sql
+```
 
-# Generate synthetic data and run the full pipeline
-python scripts/generate_data.py
+Check `config/config.yaml` for the local database host, port, and name. Then run:
+
+```powershell
+$env:MEDIFLOW_CONFIG = "config/config.yaml"
+$env:MEDIFLOW_LOAD_MODE = "full"
 python run_pipeline.py
+```
 
-# Run tests
+To use incremental upserts on a database that has already been initialized:
+
+```powershell
+$env:MEDIFLOW_LOAD_MODE = "incremental"
+python run_pipeline.py
+```
+
+### 2B. Run the ETL with Docker Compose
+
+After completing the clone, environment setup, and data generation above:
+
+```powershell
+docker compose up -d postgres
+docker compose build etl
+docker compose run --rm etl
+```
+
+The Docker configuration targets the `mediflow_docker` database, separate from the local `mediflow_analytics` database. Raw CSVs are copied into the ETL image at build time, so **rebuild the ETL image if you regenerate the source CSVs**.
+
+To run the containerized pipeline in incremental mode:
+
+```powershell
+docker compose run --rm -e MEDIFLOW_LOAD_MODE=incremental etl
+```
+
+### 3. Start Apache Airflow (optional)
+
+The Airflow deployment uses both Compose files and the generated source data in the repository directory:
+
+```powershell
+docker compose -f compose.yaml -f compose.airflow.yaml up -d postgres airflow-db airflow
+```
+
+Open **http://localhost:8080** and sign in using the credentials generated by the Airflow standalone service (consult its container logs). Find the `mediflow_etl` DAG to inspect or trigger runs. The DAG checks its database connection before ETL execution and validates record counts afterward.
+
+```powershell
+docker compose -f compose.yaml -f compose.airflow.yaml logs airflow
+```
+
+> The Airflow service uses a read-only mount of the project source plus writable mounts for pipeline output. Generate the CSV files on the host first.
+
+### 4. Run tests
+
+```powershell
 python -m pytest tests/ -v
 ```
 
-## Dashboard
+The local command skips the two opt-in database integration tests unless their dedicated test-database requirements are explicitly satisfied. Consult the test and CI configuration before enabling database integration tests; do not point destructive tests at a production or portfolio database.
 
-Three Power BI report pages:
+## Business questions explored
+
+The SQL analyses and dashboards address questions such as:
+
+- Which departments generate the most revenue, and where might resources be needed?
+- What are doctors' appointment workloads, cancellation rates, and no-show rates?
+- How does average length of stay vary across departments?
+- Which insurance providers have lower claim approval rates?
+- Which laboratory tests have longer turnaround times?
+- How does revenue change month over month?
+- Who are the highest-performing doctors within their departments?
+
+## Power BI dashboards
 
 ### Executive Overview
-KPI cards (patients, revenue, appointments, doctors, completion rate), revenue trend, revenue by department.
+
+Patient, appointment, doctor, and revenue KPIs; completion rates; revenue trends and departmental breakdowns.
 
 ![Executive Overview](docs/screenshots/executive-overview.png)
 
 ### Department & Doctor Performance
-Doctor workload table, average length of stay by department, lab turnaround time by test.
+
+Doctor workload, average length of stay, and laboratory turnaround-time analysis.
 
 ![Department & Doctor Performance](docs/screenshots/department-doctor-performance.png)
 
 ### Financial & Insurance
-Claim approval rate by provider, revenue by payment method/status, direct-relationship revenue validation (`USERELATIONSHIP`).
+
+Insurance approval rates, revenue by payment method and status, and DAX relationship handling using `USERELATIONSHIP`.
 
 ![Financial & Insurance](docs/screenshots/financial-insurance.png)
 
-### Full interactive report
-The complete `.pbix` file is included in this repo under `powerbi/mediflow-analytics.pbix` — download it and open in [Power BI Desktop](https://www.microsoft.com/en-us/power-platform/products/power-bi/downloads) (free) to explore interactively, including live filtering, drill-through, and the underlying DAX measures.
+The interactive report is available at [`powerbi/mediflow-analytics.pbix`](powerbi/mediflow-analytics.pbix) and can be opened with [Power BI Desktop](https://www.microsoft.com/en-us/power-platform/products/power-bi/downloads).
+
+## Scope and limitations
+
+- This is a **portfolio project using synthetic data**, not a production hospital system.
+- Incremental mode uses batch upserts, not streaming or CDC.
+- The DAG's verification step checks expected table counts; it is not a replacement for comprehensive data observability.
+- Local tests and GitHub Actions provide automated checks, but a clean-clone, end-to-end deployment on another machine has not been independently verified.
 
 ## License
 
-Personal portfolio project.
+Personal portfolio project. No separate open-source license is declared here.
