@@ -32,6 +32,7 @@ import pandas as pd
 import yaml
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger("etl.load")
@@ -95,11 +96,16 @@ def get_engine(config_path: str = "config/config.yaml"):
             "Check that .env exists and is non-empty."
         )
 
-    conn_str = (
-        f"postgresql+psycopg2://{user}:{password}"
-        f"@{db_cfg['host']}:{db_cfg['port']}/{db_cfg['name']}"
+    connection_url = URL.create(
+        drivername="postgresql+psycopg2",
+        username=user,
+        password=password,
+        host=db_cfg["host"],
+        port=int(db_cfg["port"]),
+        database=db_cfg["name"],
     )
-    return create_engine(conn_str)
+
+    return create_engine(connection_url)
 
 
 def load_all(clean: dict, config_path: str = "config/config.yaml") -> None:
