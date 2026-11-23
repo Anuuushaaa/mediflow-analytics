@@ -106,7 +106,10 @@ def run():
 
         logger.info("STAGE 2: Transforming datasets")
 
-        clean = transform_all(raw)
+        clean = transform_all(
+            raw,
+            config_path=config_path,
+        )
 
         logger.info(
             "Transformation completed: %s datasets",
