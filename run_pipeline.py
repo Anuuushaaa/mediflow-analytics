@@ -7,7 +7,7 @@ Single entry point for the full ETL pipeline:
 Extract -> Transform -> Load and Verify
 
 Designed for unattended execution using Windows Task
-Scheduler, cron, or another orchestration tool.
+Scheduler, Docker, cron, or another orchestration tool.
 
 Exit codes:
     0 = Pipeline completed successfully
@@ -15,9 +15,13 @@ Exit codes:
 
 Usage:
     python run_pipeline.py
+
+Docker:
+    Set MEDIFLOW_CONFIG=config/docker_config.yaml
 """
 
 import logging
+import os
 import sys
 import time
 from datetime import datetime
@@ -25,6 +29,7 @@ from datetime import datetime
 from etl.extract import extract_all, ExtractionError
 from etl.transform import transform_all
 from etl.load import load_all, LoadError
+
 
 logger = logging.getLogger("run_pipeline")
 
@@ -37,7 +42,17 @@ def run() -> int:
         0 on success
         1 on failure
     """
+
+    # Select configuration based on the environment.
+    # Windows uses the existing configuration by default.
+    # Docker will explicitly set MEDIFLOW_CONFIG.
+    config_path = os.getenv(
+        "MEDIFLOW_CONFIG",
+        "config/config.yaml"
+    )
+
     start_time = time.time()
+
     run_started_at = datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -47,6 +62,7 @@ def run() -> int:
         "# MediFlow Analytics - Pipeline run started at %s",
         run_started_at,
     )
+    logger.info("# Configuration: %s", config_path)
     logger.info("#" * 70)
 
     stage = "Extract"
@@ -54,17 +70,29 @@ def run() -> int:
     try:
         # Stage 1: Extract raw datasets.
         logger.info("Starting extraction")
-        raw = extract_all()
+
+        raw = extract_all(
+            config_path=config_path
+        )
 
         # Stage 2: Clean and transform datasets.
         stage = "Transform"
+
         logger.info("Starting transformation")
+
         clean = transform_all(raw)
 
         # Stage 3: Load and verify inside one transaction.
         stage = "Load and Verify"
-        logger.info("Starting transactional load and verification")
-        load_all(clean)
+
+        logger.info(
+            "Starting transactional load and verification"
+        )
+
+        load_all(
+            clean,
+            config_path=config_path
+        )
 
     except (ExtractionError, LoadError) as e:
         elapsed = round(time.time() - start_time, 1)

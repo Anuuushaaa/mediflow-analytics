@@ -1,0 +1,24 @@
+
+# MediFlow Analytics — Docker-only configuration
+
+database:
+  host: "postgres"
+  port: 5432
+  name: "mediflow_docker"
+
+paths:
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  logs_dir: "logs"
+
+etl:
+  chunk_size: 5000
+  fail_on_schema_mismatch: true
+  duplicate_check_columns:
+    patients: ["patient_id"]
+    doctors: ["doctor_id"]
+    appointments: ["appointment_id"]
+
+logging:
+  level: "INFO"
+  log_file: "logs/etl_pipeline.log"

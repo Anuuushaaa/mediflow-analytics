@@ -1,0 +1,34 @@
+
+# Python virtual environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Git and local development
+.git/
+.pytest_cache/
+.vscode/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local logs
+logs/
+*.log
+
+# Local generated data
+data/processed/
+data/quarantine/
+
+# Large or unrelated project assets
+powerbi/
+notebooks/
+docs/
+*.zip
+*.pbix
+
+# Local tests and caches
+tests/
