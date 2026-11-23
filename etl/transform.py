@@ -42,6 +42,8 @@ def _quarantine(df: pd.DataFrame, reason: str, dataset_name: str) -> pd.DataFram
     if df.empty:
         return df
     rejected_dir = _active_rejected_dir.get()
+    if rejected_dir == Path("data/processed/rejected"):
+        rejected_dir = REJECTED_DIR
     rejected_dir.mkdir(parents=True, exist_ok=True)
     out_path = rejected_dir / f"{dataset_name}_rejected.csv"
     rejected = df.copy()
